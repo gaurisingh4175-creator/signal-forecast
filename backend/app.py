@@ -1,18 +1,30 @@
+
+import os
+import secrets
+import threading
+
+from functools import wraps
+
 from flask import Flask, jsonify, request, session
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
-from functools import wraps
+
 from forecast_engine import run_forecast
 from validation_engine import run_validation
 from location_engine import get_locations, find_nearest_good_signal
 from auth import register_user, verify_user
-import os
-import threading
-import secrets
+
+
+# =====================================================
+# FLASK APPLICATION CONFIGURATION
+# =====================================================
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
-from flask_cors import CORS
+
+app.secret_key = os.environ.get(
+    "FLASK_SECRET_KEY",
+    secrets.token_hex(32)
+)
 
 CORS(
     app,
@@ -22,24 +34,57 @@ CORS(
         "https://signal-forecast.vercel.app"
     ]
 )
+
 app.config.update(
-    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_HTTPONLY=True,
+    MAX_CONTENT_LENGTH=50 * 1024 * 1024
 )
 
 UPLOAD_DIR = "uploads"
-DEFAULT_FILE = os.path.join("data", "File A- signal_rsrp_India_Today_(2026-07-05)_detailed.xlsx")
+DEFAULT_FILE = os.path.join(
+    "data",
+    "File A- signal_rsrp_India_Today_(2026-07-05)_detailed.xlsx"
+)
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 _cache = {}
 _lock = threading.Lock()
 
 
+# =====================================================
+# HOME AND HEALTH CHECK ROUTES
+# =====================================================
+
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "success": True,
+        "message": "Signal Forecast Backend is running!"
+    }), 200
+
+
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({
+        "success": True,
+        "status": "healthy",
+        "message": "Flask backend is running"
+    }), 200
+
+
+# =====================================================
+# HELPER FUNCTIONS
+# =====================================================
+
 def clamp_days(value, default=7, lo=1, hi=10):
     try:
         value = int(value)
     except (TypeError, ValueError):
         return default
+
     return max(lo, min(hi, value))
 
 
@@ -47,181 +92,370 @@ def login_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         if "username" not in session:
-            return jsonify({"error": "Not authenticated"}), 401
+            return jsonify({
+                "error": "Not authenticated"
+            }), 401
+
         return f(*args, **kwargs)
+
     return wrapper
 
 
-# ---------- Auth routes ----------
-@app.route('/api/register', methods=['POST'])
+def get_file_path(filename=None):
+    if not filename:
+        return DEFAULT_FILE
+
+    safe_filename = secure_filename(filename)
+
+    if safe_filename != filename:
+        raise ValueError("Invalid filename")
+
+    file_path = os.path.join(UPLOAD_DIR, safe_filename)
+
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError("Uploaded file not found")
+
+    return file_path
+
+
+# =====================================================
+# AUTHENTICATION ROUTES
+# =====================================================
+
+@app.route("/api/register", methods=["POST"])
 def register():
-    data = request.get_json() or {}
-    username = (data.get('username') or "").strip()
-    password = data.get('password') or ""
+    data = request.get_json(silent=True) or {}
+
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
     if not username or not password:
-        return jsonify({"error": "Username and password are required"}), 400
+        return jsonify({
+            "error": "Username and password are required"
+        }), 400
 
     ok, msg = register_user(username, password)
+
     if not ok:
         return jsonify({"error": msg}), 400
 
-    session['username'] = username
-    return jsonify({"message": msg, "username": username})
+    session["username"] = username
+
+    return jsonify({
+        "message": msg,
+        "username": username
+    }), 200
 
 
-@app.route('/api/login', methods=['POST'])
+@app.route("/api/login", methods=["POST"])
 def login():
-    data = request.get_json() or {}
-    username = (data.get('username') or "").strip()
-    password = data.get('password') or ""
+    data = request.get_json(silent=True) or {}
+
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
 
     if not verify_user(username, password):
-        return jsonify({"error": "Invalid username or password"}), 401
+        return jsonify({
+            "error": "Invalid username or password"
+        }), 401
 
-    session['username'] = username
-    return jsonify({"message": "Logged in successfully", "username": username})
+    session["username"] = username
+
+    return jsonify({
+        "message": "Logged in successfully",
+        "username": username
+    }), 200
 
 
-@app.route('/api/logout', methods=['POST'])
+@app.route("/api/logout", methods=["POST"])
 def logout():
-    session.pop('username', None)
-    return jsonify({"message": "Logged out"})
+    session.pop("username", None)
+
+    return jsonify({
+        "message": "Logged out"
+    }), 200
 
 
-@app.route('/api/me', methods=['GET'])
+@app.route("/api/me", methods=["GET"])
 def me():
     if "username" in session:
-        return jsonify({"username": session["username"]})
-    return jsonify({"username": None}), 200
+        return jsonify({
+            "username": session["username"]
+        }), 200
+
+    return jsonify({
+        "username": None
+    }), 200
 
 
-# ---------- Health check (public, no login needed) ----------
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "ok", "message": "Flask backend is running"})
+# =====================================================
+# EXCEL UPLOAD ROUTE
+# =====================================================
 
-
-# ---------- Protected routes ----------
-@app.route('/api/upload', methods=['POST'])
+@app.route("/api/upload", methods=["POST"])
 @login_required
 def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file provided"}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No file selected"}), 400
-    if not file.filename.endswith('.xlsx'):
-        return jsonify({"error": "Only .xlsx files are supported"}), 400
+
+    if "file" not in request.files:
+        return jsonify({
+            "success": False,
+            "error": "No file provided"
+        }), 400
+
+    file = request.files["file"]
+
+    if not file.filename:
+        return jsonify({
+            "success": False,
+            "error": "No file selected"
+        }), 400
 
     filename = secure_filename(file.filename)
-    save_path = os.path.join(UPLOAD_DIR, filename)
-    file.save(save_path)
-    return jsonify({"message": "File uploaded successfully", "filename": filename})
+
+    if not filename.lower().endswith(".xlsx"):
+        return jsonify({
+            "success": False,
+            "error": "Only .xlsx files are supported"
+        }), 400
+
+    try:
+        save_path = os.path.join(UPLOAD_DIR, filename)
+        file.save(save_path)
+
+        return jsonify({
+            "success": True,
+            "message": "File uploaded successfully",
+            "filename": filename
+        }), 200
+
+    except Exception as e:
+        app.logger.exception("File upload failed")
+
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 
-@app.route('/api/forecast', methods=['GET'])
+# =====================================================
+# FORECASTING ROUTES
+# =====================================================
+
+@app.route("/api/forecast", methods=["GET"])
 @login_required
 def get_forecast():
-    filename = request.args.get('filename')
-    model = request.args.get('model', 'random_forest')
-    train_days = clamp_days(request.args.get('train_days'), default=7)
-    predict_days = clamp_days(request.args.get('predict_days'), default=7)
 
-    file_path = os.path.join(UPLOAD_DIR, filename) if filename else DEFAULT_FILE
-    cache_key = (filename or "default", model, train_days, predict_days)
+    filename = request.args.get("filename")
+    model = request.args.get("model", "random_forest")
+
+    train_days = clamp_days(request.args.get("train_days"))
+    predict_days = clamp_days(request.args.get("predict_days"))
 
     try:
+        file_path = get_file_path(filename)
+
+        cache_key = (
+            filename or "default",
+            model,
+            train_days,
+            predict_days
+        )
+
         with _lock:
             if cache_key not in _cache:
-                if model == 'prophet':
+
+                if model == "prophet":
                     from prophet_engine import run_forecast_prophet
-                    result = run_forecast_prophet(file_path, train_days=train_days, predict_days=predict_days)
+
+                    result = run_forecast_prophet(
+                        file_path,
+                        train_days=train_days,
+                        predict_days=predict_days
+                    )
+
                 else:
-                    result = run_forecast(file_path, train_days=train_days, predict_days=predict_days)
+                    result = run_forecast(
+                        file_path,
+                        train_days=train_days,
+                        predict_days=predict_days
+                    )
+
                 _cache[cache_key] = result
-        return jsonify(_cache[cache_key])
+
+        return jsonify(_cache[cache_key]), 200
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Forecast failed")
+
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 
-@app.route('/api/forecast/refresh', methods=['POST'])
+@app.route("/api/forecast/refresh", methods=["POST"])
 @login_required
 def refresh_forecast():
-    filename = request.args.get('filename')
-    model = request.args.get('model', 'random_forest')
-    train_days = clamp_days(request.args.get('train_days'), default=7)
-    predict_days = clamp_days(request.args.get('predict_days'), default=7)
 
-    file_path = os.path.join(UPLOAD_DIR, filename) if filename else DEFAULT_FILE
-    cache_key = (filename or "default", model, train_days, predict_days)
+    filename = request.args.get("filename")
+    model = request.args.get("model", "random_forest")
+
+    train_days = clamp_days(request.args.get("train_days"))
+    predict_days = clamp_days(request.args.get("predict_days"))
 
     try:
+        file_path = get_file_path(filename)
+
+        cache_key = (
+            filename or "default",
+            model,
+            train_days,
+            predict_days
+        )
+
         with _lock:
-            if model == 'prophet':
+
+            if model == "prophet":
                 from prophet_engine import run_forecast_prophet
-                result = run_forecast_prophet(file_path, train_days=train_days, predict_days=predict_days)
+
+                result = run_forecast_prophet(
+                    file_path,
+                    train_days=train_days,
+                    predict_days=predict_days
+                )
+
             else:
-                result = run_forecast(file_path, train_days=train_days, predict_days=predict_days)
+                result = run_forecast(
+                    file_path,
+                    train_days=train_days,
+                    predict_days=predict_days
+                )
+
             _cache[cache_key] = result
-        return jsonify(result)
+
+        return jsonify(result), 200
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Forecast refresh failed")
+
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 
-@app.route('/api/validate', methods=['GET'])
+# =====================================================
+# MODEL VALIDATION
+# =====================================================
+
+@app.route("/api/validate", methods=["GET"])
 @login_required
 def get_validation():
-    filename = request.args.get('filename')
-    file_path = os.path.join(UPLOAD_DIR, filename) if filename else DEFAULT_FILE
+
+    filename = request.args.get("filename")
+
     try:
+        file_path = get_file_path(filename)
         result = run_validation(file_path)
-        return jsonify(result)
+
+        return jsonify(result), 200
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Validation failed")
+
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 
-@app.route('/api/locations', methods=['GET'])
+# =====================================================
+# LOCATION ROUTES
+# =====================================================
+
+@app.route("/api/locations", methods=["GET"])
 @login_required
 def get_locations_route():
-    filename = request.args.get('filename')
-    file_path = os.path.join(UPLOAD_DIR, filename) if filename else DEFAULT_FILE
+
+    filename = request.args.get("filename")
+
     try:
+        file_path = get_file_path(filename)
         locations = get_locations(file_path)
-        return jsonify({"locations": locations})
+
+        return jsonify({
+            "locations": locations
+        }), 200
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route('/api/nearest-good-signal', methods=['GET'])
+        app.logger.exception("Location lookup failed")
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/nearest-good-signal", methods=["GET"])
 @login_required
 def nearest_good_signal_route():
-    filename = request.args.get('filename')
-    lat = request.args.get('lat')
-    lon = request.args.get('lon')
+
+    filename = request.args.get("filename")
+
+    lat = request.args.get("lat")
+    lon = request.args.get("lon")
 
     if lat is None or lon is None:
-        return jsonify({"error": "lat and lon query parameters are required"}), 400
+        return jsonify({
+            "error": "lat and lon query parameters are required"
+        }), 400
 
     try:
         lat = float(lat)
         lon = float(lon)
-    except ValueError:
-        return jsonify({"error": "lat and lon must be valid numbers"}), 400
 
-    file_path = os.path.join(UPLOAD_DIR, filename) if filename else DEFAULT_FILE
-    try:
-        result = find_nearest_good_signal(file_path, lat, lon)
-        return jsonify(result)
+        file_path = get_file_path(filename)
+
+        result = find_nearest_good_signal(
+            file_path,
+            lat,
+            lon
+        )
+
+        return jsonify(result), 200
+
+    except ValueError as e:
+        return jsonify({
+            "error": str(e)
+        }), 400
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Nearest signal lookup failed")
+
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 
-@app.route('/api/uploaded-files', methods=['GET'])
+# =====================================================
+# UPLOADED FILES
+# =====================================================
+
+@app.route("/api/uploaded-files", methods=["GET"])
 @login_required
 def list_uploaded_files():
-    files = [f for f in os.listdir(UPLOAD_DIR) if f.endswith('.xlsx')]
-    return jsonify({"files": files})
 
-# ---------- Signal Quality Classification ----------
-@app.route('/api/classification', methods=['GET'])
+    files = [
+        f for f in os.listdir(UPLOAD_DIR)
+        if f.lower().endswith(".xlsx")
+    ]
+
+    return jsonify({
+        "files": files
+    }), 200
+
+
+# =====================================================
+# SIGNAL QUALITY CLASSIFICATION + SHAP
+# =====================================================
+
+@app.route("/api/classification", methods=["GET"])
 @login_required
 def get_classification():
 
@@ -247,5 +481,13 @@ def get_classification():
         }), 500
 
 
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+# =====================================================
+# RUN APPLICATION LOCALLY
+# =====================================================
+
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000)),
+        debug=False
+    )
