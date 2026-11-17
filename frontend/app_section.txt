@@ -1,0 +1,30 @@
+﻿          <button className="back-btn" onClick={goToSetup}>â† Back to Setup</button>
+
+          {validation && (
+            <section className="card">
+              <h2>Model Accuracy â€” Held-Out Validation</h2>
+              <p className="muted">Trained on the first {validation.train_rows} real readings, tested on the remaining {validation.test_rows}. Lower is better.</p>
+              <ResponsiveContainer width="100%" height={260}>
+                <BarChart data={validationChartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                  <XAxis dataKey="metric" tick={{ fill: 'var(--text-muted)', fontSize: 13 }} />
+                  <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 13 }} label={{ value: 'MAE', angle: -90, position: 'insideLeft', fill: 'var(--text-muted)' }} />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="Prophet" fill="var(--chart-prophet)" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="Random Forest" fill="var(--chart-rf)" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+              <table className="data-table">
+                <thead><tr><th>Metric</th><th>Prophet MAE</th><th>Prophet RMSE</th><th>RF MAE</th><th>RF RMSE</th></tr></thead>
+                <tbody>
+                  {Object.entries(validation.results).map(([metric, vals]) => {
+                    const pBetter = vals.prophet.mae < (vals.random_forest.mae ?? Infinity)
+                    return (
+                      <tr key={metric}>
+                        <td className="row-label">{metric}</td>
+                        <td className={pBetter ? 'better' : ''}>{vals.prophet.mae}</td>
+                        <td className={pBetter ? 'better' : ''}>{vals.prophet.rmse}</td>
+                        <td className={!pBetter ? 'better' : ''}>{vals.random_forest.mae ?? 'â€”'}</td>
+                        <td className={!pBetter ? 'better' : ''}>{vals.random_forest.rmse ?? 'â€”'}</td>
+                      </tr>
