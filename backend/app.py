@@ -12,7 +12,14 @@ import secrets
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
-CORS(app, supports_credentials=True, origins=["http://localhost:5173"])
+CORS(
+    app,
+    supports_credentials=True,
+    origins=[
+        "http://localhost:5173",
+        "https://signal-forecast.vercel.app"
+    ]
+)
 
 app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
