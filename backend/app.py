@@ -12,6 +12,8 @@ import secrets
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
+from flask_cors import CORS
+
 CORS(
     app,
     supports_credentials=True,
@@ -20,7 +22,6 @@ CORS(
         "https://signal-forecast.vercel.app"
     ]
 )
-
 app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_HTTPONLY=True,
