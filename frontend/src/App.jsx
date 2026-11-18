@@ -7,7 +7,7 @@ import {
 import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet'
 import './App.css'
 
-const API_BASE = 'http://localhost:5000'
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000'
 axios.defaults.withCredentials = true
 
 const QUALITY_COLORS = {
